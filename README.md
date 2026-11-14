@@ -3,7 +3,8 @@
 A terminal client for the small web: **gopher** and **gemini**, built with
 [bubbletea](https://github.com/charmbracelet/bubbletea),
 [lipgloss](https://github.com/charmbracelet/lipgloss) and
-[glamour](https://github.com/charmbracelet/glamour).
+[glamour](https://github.com/charmbracelet/glamour). I literally vibecoded
+this in an hour.
 
 | gemini | gopher |
 | --- | --- |

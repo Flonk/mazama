@@ -13,8 +13,8 @@ this in an hour.
 ## Run
 
 ```sh
-nix-shell        # or: direnv allow
-go run . [address]
+nix run github:Flonk/mazama -- [address]   # with nix
+make run ARGS="[address]"                  # with Go ≥ 1.26
 ```
 
 `address` can be a `gopher://`, `gemini://` or `https://` URL, or just a host
@@ -47,3 +47,18 @@ protocol from the address and, if needed, by probing the host. It defaults to
 | r                 | reload                             |
 | esc               | cancel / deselect                  |
 | q                 | quit                               |
+
+## Install
+
+```sh
+nix profile install github:Flonk/mazama     # nix
+go install github.com/Flonk/mazama@latest  # go
+make install                               # from a checkout; PREFIX=/usr/local by default
+```
+
+For development: `nix develop` (or `direnv allow`) for a shell with Go, then
+`make test`.
+
+## License
+
+MIT

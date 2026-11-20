@@ -9,20 +9,39 @@ import (
 
 	"github.com/Flonk/mazama/gemini"
 	"github.com/Flonk/mazama/gopher"
+	"github.com/Flonk/mazama/nntp"
 )
 
 // Location is where a page came from: a gopher address, a gemini URL (when
-// Gemini is non-nil), or a web URL the user typed (when Web is non-nil; shown
-// as an "outgoing link" page, never fetched).
+// Gemini is non-nil), a Usenet address (when News is non-nil), or a web URL
+// the user typed (when Web is non-nil; shown as an "outgoing link" page,
+// never fetched).
 type Location struct {
 	Gopher gopher.Address
 	Gemini *url.URL
+	News   *nntp.Address
 	Web    *url.URL
 }
 
-// ParseLocation parses a gemini:// or gopher:// URL. Anything without a
-// scheme is treated as gopher, as before.
+// isNewsScheme reports whether a URL scheme is one of Usenet's.
+func isNewsScheme(scheme string) bool {
+	switch strings.ToLower(scheme) {
+	case "news", "nntp", "nntps", "snews":
+		return true
+	}
+	return false
+}
+
+// ParseLocation parses a gemini://, news:// (nntp, nntps, snews) or
+// gopher:// URL. Anything without a scheme is treated as gopher, as before.
 func ParseLocation(raw string) (Location, error) {
+	if scheme, _, ok := strings.Cut(raw, "://"); ok && isNewsScheme(scheme) {
+		a, err := nntp.ParseURL(raw)
+		if err != nil {
+			return Location{}, err
+		}
+		return Location{News: &a}, nil
+	}
 	if strings.HasPrefix(strings.ToLower(raw), "gemini://") {
 		u, err := url.Parse(raw)
 		if err != nil {
@@ -44,6 +63,9 @@ func (l Location) String() string {
 	if l.Gemini != nil {
 		return l.Gemini.String()
 	}
+	if l.News != nil {
+		return l.News.String()
+	}
 	if l.Web != nil {
 		return l.Web.String()
 	}
@@ -53,6 +75,11 @@ func (l Location) String() string {
 // withQuery returns the location with user input attached: a gopher search
 // query, or a gemini query string.
 func (l Location) withQuery(q string) Location {
+	if l.News != nil {
+		a := l.News.Server()
+		a.Group = searchPattern(q)
+		return Location{News: &a}
+	}
 	if l.Gemini != nil {
 		u := *l.Gemini
 		u.RawQuery = gemini.QueryEscape(q)
@@ -110,7 +137,7 @@ func geminiPage(p *page, mimeType string, body []byte) error {
 	p.kind = textPage
 	switch {
 	case mt == "text/gemini":
-		p.raw, p.markdown, p.gemtext = gemini.ToMarkdown(string(body)), true, true
+		p.raw, p.markdown, p.keepLines = gemini.ToMarkdown(string(body)), true, true
 	case mt == "text/markdown":
 		p.raw, p.markdown = string(body), true
 	case strings.HasPrefix(mt, "text/"):

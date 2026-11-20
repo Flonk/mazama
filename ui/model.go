@@ -5,6 +5,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Flonk/mazama/gemini"
 	"github.com/Flonk/mazama/gopher"
+	"github.com/Flonk/mazama/nntp"
 )
 
 type pageKind int
@@ -30,15 +32,15 @@ const (
 // page is one entry in the history stack. Scroll positions are stored on it
 // so going back returns you to where you were.
 type page struct {
-	addr     Location
-	kind     pageKind
-	items    []gopher.Item
-	cursor   int
-	offset   int
-	raw      string
-	markdown bool
-	gemtext  bool // markdown converted from gemtext: keep its line breaks
-	yOffset  int
+	addr      Location
+	kind      pageKind
+	items     []menuItem
+	cursor    int
+	offset    int
+	raw       string
+	markdown  bool
+	keepLines bool // line-oriented markdown (from gemtext or news): keep its line breaks
+	yOffset   int
 
 	// Markdown links (see markdown.go). rendered is the display content
 	// without the selected-link highlight; selLink is -1 when none is selected.
@@ -48,12 +50,32 @@ type page struct {
 	selLink  int
 }
 
+// menuItem is one menu line. Gopher menus only use the embedded item; other
+// menus (news) set target, where the line leads, and tag, the type column.
+type menuItem struct {
+	gopher.Item
+	target *Location
+	search bool // ask for a query before opening target
+	login  bool // ask for a news login, then reload target
+	tag    string
+}
+
+func gopherItems(items []gopher.Item) []menuItem {
+	out := make([]menuItem, len(items))
+	for i, it := range items {
+		out[i] = menuItem{Item: it}
+	}
+	return out
+}
+
 type inputMode int
 
 const (
 	noInput inputMode = iota
 	gotoInput
 	searchInput
+	callbackInput // the answer goes to Model.onInput
+	confirmInput  // a y/n question; "y" runs Model.onInput
 )
 
 type fetchedMsg struct {
@@ -64,6 +86,11 @@ type fetchedMsg struct {
 	data    []byte
 	err     error
 	replace bool // reload: swap the current page instead of pushing
+
+	// News pages arrive ready-made: a menu, or an article as markdown.
+	menu  bool
+	items []menuItem
+	text  string
 }
 
 // Model is the root bubbletea model.
@@ -76,6 +103,11 @@ type Model struct {
 	mode  inputMode
 	// searchTarget is the gopher search item or gemini URL waiting for input.
 	searchTarget Location
+	// onInput receives the answer in callbackInput mode.
+	onInput func(m *Model, val string) tea.Cmd
+	// typedLogin is a news login the user just typed, waiting for the
+	// server to accept it before offering to save it.
+	typedLogin *newsLogin
 
 	styleCfg gansi.StyleConfig
 	theme    Theme
@@ -93,12 +125,14 @@ type Model struct {
 	// events to us; see syncMouse.
 	mouseOn bool
 
-	gem *gemini.Client
+	gem  *gemini.Client
+	news *nntp.Client
 }
 
 // New returns a model that opens start on launch, styled by a glamour style
 // config (see LoadStyle). Menus get a matching Theme. gem fetches gemini://
-// pages and carries the TOFU certificate store.
+// pages and carries the TOFU certificate store. News logins are looked up in
+// the system keyring, ~/.authinfo and ~/.netrc, or asked for.
 func New(start Location, style gansi.StyleConfig, gem *gemini.Client) Model {
 	ti := textinput.New()
 	ti.CharLimit = 1024
@@ -108,6 +142,7 @@ func New(start Location, style gansi.StyleConfig, gem *gemini.Client) Model {
 		styleCfg: style,
 		theme:    NewTheme(style),
 		gem:      gem,
+		news:     defaultNewsClient(),
 	}
 	m.initCmd = m.navigate(start, false)
 	return m
@@ -134,10 +169,30 @@ func (m *Model) navigate(a Location, replace bool) tea.Cmd {
 // navigateInput is navigate for typed input, guessing the protocol when
 // there's no scheme. Probing happens inside the fetch, so it shows as
 // loading and esc cancels it.
+// On a news page, a bare group name (sci.astro.amateur) opens that group on
+// the same server if it exists there.
 func (m *Model) navigateInput(raw string) tea.Cmd {
+	var from *Location
+	if m.cur != nil {
+		from = &m.cur.addr
+	}
+	news := m.news
 	return m.startFetch(func(ctx context.Context) (Location, error) {
-		return guessLocation(ctx, raw)
+		return resolveInput(ctx, news, from, raw)
 	}, false)
+}
+
+// resolveInput turns typed input into a Location: a bare group name on a
+// news page (from) opens that group on the same server if it exists there;
+// anything else goes to guessLocation.
+func resolveInput(ctx context.Context, news *nntp.Client, from *Location, raw string) (Location, error) {
+	name := strings.TrimSpace(raw)
+	if from != nil && from.News != nil && looksLikeGroup(name) {
+		if loc, found, err := resolveGroup(ctx, news, from.News.Server(), name, false); err == nil && found {
+			return loc, nil
+		}
+	}
+	return guessLocation(ctx, raw)
 }
 
 func (m *Model) startFetch(resolve func(context.Context) (Location, error), replace bool) tea.Cmd {
@@ -150,25 +205,32 @@ func (m *Model) startFetch(resolve func(context.Context) (Location, error), repl
 	m.cancel = cancel
 	m.loading = true
 	m.status = ""
-	gem := m.gem
+	gem, news := m.gem, m.news
 	return func() tea.Msg {
 		defer cancel()
 		a, err := resolve(ctx)
 		if err != nil {
 			return fetchedMsg{seq: seq, err: err}
 		}
-		var msg fetchedMsg
-		switch {
-		case a.Web != nil:
-			msg = fetchedMsg{addr: a} // nothing to fetch; openPage shows webPage
-		case a.Gemini != nil:
-			msg = fetchGemini(ctx, gem, a.Gemini)
-		default:
-			data, err := gopher.Fetch(ctx, a.Gopher)
-			msg = fetchedMsg{addr: a, data: data, err: err}
-		}
+		msg := fetchLocation(ctx, gem, news, a)
 		msg.seq, msg.replace = seq, replace
 		return msg
+	}
+}
+
+// fetchLocation loads a in the foreground. Web locations aren't fetched;
+// buildPage turns them into webPage.
+func fetchLocation(ctx context.Context, gem *gemini.Client, news *nntp.Client, a Location) fetchedMsg {
+	switch {
+	case a.Web != nil:
+		return fetchedMsg{addr: a}
+	case a.Gemini != nil:
+		return fetchGemini(ctx, gem, a.Gemini)
+	case a.News != nil:
+		return fetchNews(ctx, news, *a.News)
+	default:
+		data, err := gopher.Fetch(ctx, a.Gopher)
+		return fetchedMsg{addr: a, data: data, err: err}
 	}
 }
 
@@ -207,6 +269,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = false
+		var authErr *nntp.AuthError
+		if errors.As(msg.err, &authErr) && msg.addr.News != nil {
+			m.typedLogin = nil
+			return m, m.askLogin(msg.addr, authErr.Failed, msg.replace)
+		}
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
 			return m, nil
@@ -216,6 +283,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if err := m.openPage(msg); err != nil {
 			m.status = "error: " + err.Error()
+		}
+		if l := m.typedLogin; l != nil && msg.addr.News != nil && msg.addr.News.Host == l.host {
+			// The server took the login just typed in.
+			m.typedLogin = nil
+			return m, m.offerSaveLogin(*l)
+		}
+		return m, nil
+
+	case loginSavedMsg:
+		if msg.err != nil {
+			m.status = "error: couldn't save login: " + msg.err.Error()
+		} else {
+			m.status = "login for " + msg.host + " saved in the keyring"
 		}
 		return m, nil
 
@@ -249,24 +329,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) openPage(msg fetchedMsg) error {
-	p := &page{addr: msg.addr, selLink: -1}
-	switch {
-	case msg.addr.Web != nil:
-		p = webPage(msg.addr.Web)
-	case msg.addr.Gemini != nil:
-		if err := geminiPage(p, msg.mime, msg.data); err != nil {
-			return err
-		}
-	case msg.addr.Gopher.Type == gopher.TypeMenu, msg.addr.Gopher.Type == gopher.TypeSearch:
-		p.kind = menuPage
-		p.items = gopher.ParseMenu(msg.data)
-		p.cursor = firstSelectable(p.items)
-	default:
-		p.kind = textPage
-		p.raw = string(gopher.StripTerminator(msg.data))
-		p.markdown = isMarkdown(msg.addr.Gopher.Selector)
+	p, err := buildPage(msg)
+	if err != nil {
+		return err
 	}
-
 	if m.cur != nil && !msg.replace {
 		m.saveScroll()
 		m.history = append(m.history, m.cur)
@@ -281,11 +347,53 @@ func (m *Model) openPage(msg fetchedMsg) error {
 	return nil
 }
 
+// buildPage turns a successful fetch into an unrendered page.
+func buildPage(msg fetchedMsg) (*page, error) {
+	p := &page{addr: msg.addr, selLink: -1}
+	switch {
+	case msg.addr.Web != nil:
+		p = webPage(msg.addr.Web)
+	case msg.addr.Gemini != nil:
+		if err := geminiPage(p, msg.mime, msg.data); err != nil {
+			return nil, err
+		}
+	case msg.addr.News != nil && msg.menu:
+		p.kind = menuPage
+		p.items = msg.items
+		p.cursor = firstSelectable(p.items)
+	case msg.addr.News != nil:
+		p.kind = textPage
+		p.raw, p.markdown, p.keepLines = msg.text, true, true
+	case msg.addr.Gopher.Type == gopher.TypeMenu, msg.addr.Gopher.Type == gopher.TypeSearch:
+		p.kind = menuPage
+		p.items = gopherItems(gopher.ParseMenu(msg.data))
+		p.cursor = firstSelectable(p.items)
+	default:
+		p.kind = textPage
+		p.raw = string(gopher.StripTerminator(msg.data))
+		p.markdown = isMarkdown(msg.addr.Gopher.Selector)
+	}
+	return p, nil
+}
+
 // promptInput opens the footer input for a gopher search or a gemini input
 // request; the answer is sent to target as its query.
 func (m *Model) promptInput(target Location, prompt string, sensitive bool) tea.Cmd {
 	m.mode = searchInput
 	m.searchTarget = target
+	m.input.Prompt = ansi.Truncate(prompt, max(m.width/2, 10), "…") + " "
+	m.input.SetValue("")
+	m.input.EchoMode = textinput.EchoNormal
+	if sensitive {
+		m.input.EchoMode = textinput.EchoPassword
+	}
+	return m.input.Focus()
+}
+
+// askInput opens the footer input and hands the answer to done.
+func (m *Model) askInput(prompt string, sensitive bool, done func(m *Model, val string) tea.Cmd) tea.Cmd {
+	m.mode = callbackInput
+	m.onInput = done
 	m.input.Prompt = ansi.Truncate(prompt, max(m.width/2, 10), "…") + " "
 	m.input.SetValue("")
 	m.input.EchoMode = textinput.EchoNormal
@@ -325,7 +433,11 @@ func (m *Model) setTextContent() {
 	p.rendered = strings.ReplaceAll(p.raw, "\t", "    ")
 	p.links, p.spans = nil, nil
 	if p.markdown && m.width > 0 {
-		content, links, spans, err := renderMarkdown(p.raw, m.styleCfg, min(m.width-4, 100), p.gemtext)
+		cfg := m.styleCfg
+		if p.addr.News != nil {
+			cfg = quoteBars(cfg)
+		}
+		content, links, spans, err := renderMarkdown(p.raw, cfg, min(m.width-4, 100), p.keepLines)
 		if err == nil {
 			p.rendered, p.links, p.spans = content, links, spans
 		}
@@ -353,6 +465,10 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 		}
 		return m, m.input.Focus()
+	case "n":
+		if m.cur != nil && m.cur.addr.News != nil {
+			return m, m.promptGroup()
+		}
 	case "r":
 		if m.cur != nil {
 			return m, m.navigate(m.cur.addr, true)
@@ -416,7 +532,16 @@ func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) activate(it gopher.Item) (tea.Model, tea.Cmd) {
+func (m Model) activate(it menuItem) (tea.Model, tea.Cmd) {
+	if it.target != nil {
+		if it.login {
+			return m, m.askLogin(*it.target, false, true)
+		}
+		if it.search {
+			return m, m.promptInput(*it.target, it.Display+":", false)
+		}
+		return m, m.navigate(*it.target, false)
+	}
 	switch it.Type {
 	case gopher.TypeMenu, gopher.TypeText:
 		return m, m.navigate(Location{Gopher: it.Address()}, false)
@@ -437,12 +562,37 @@ func (m Model) activate(it gopher.Item) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == confirmInput {
+		// Any key answers; only y means yes.
+		yes, done := msg.String() == "y" || msg.String() == "Y", m.onInput
+		m.mode, m.onInput = noInput, nil
+		m.input.Blur()
+		if yes && done != nil {
+			cmd := done(&m, "y")
+			return m, cmd
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.mode = noInput
+		m.onInput = nil
+		m.input.SetValue("")
 		m.input.Blur()
 		return m, nil
 	case "enter":
+		if m.mode == callbackInput {
+			// Taken verbatim: it may be a password.
+			val, done := m.input.Value(), m.onInput
+			m.mode, m.onInput = noInput, nil
+			m.input.SetValue("")
+			m.input.Blur()
+			if val == "" || done == nil {
+				return m, nil
+			}
+			cmd := done(&m, val)
+			return m, cmd
+		}
 		val := strings.TrimSpace(m.input.Value())
 		mode := m.mode
 		m.mode = noInput
@@ -472,7 +622,7 @@ func (m *Model) ensureCursorVisible() {
 	p.offset = max(min(p.offset, len(p.items)-h), 0)
 }
 
-func firstSelectable(items []gopher.Item) int {
+func firstSelectable(items []menuItem) int {
 	for i, it := range items {
 		if it.Selectable() {
 			return i
@@ -481,7 +631,7 @@ func firstSelectable(items []gopher.Item) int {
 	return 0
 }
 
-func nextSelectable(items []gopher.Item, from, dir int) int {
+func nextSelectable(items []menuItem, from, dir int) int {
 	for i := from + dir; i >= 0 && i < len(items); i += dir {
 		if items[i].Selectable() {
 			return i

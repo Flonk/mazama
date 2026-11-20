@@ -97,9 +97,14 @@ func TestProbeProtocolPreference(t *testing.T) {
 		t.Errorf("only gopher open: got %q, %v", got, err)
 	}
 
-	withProbePorts(t, open, open, open)
+	withProbePorts(t, open, closed, closed)
 	if got, err := probeProtocol(ctx, "127.0.0.1"); err != nil || got != protoGemini {
-		t.Errorf("all open: got %q, %v, want gemini", got, err)
+		t.Errorf("only gemini open: got %q, %v", got, err)
+	}
+
+	withProbePorts(t, open, open, open)
+	if got, err := probeProtocol(ctx, "127.0.0.1"); err != nil || got != protoGopher {
+		t.Errorf("all open: got %q, %v, want gopher", got, err)
 	}
 
 	withProbePorts(t, closed, closed, open)

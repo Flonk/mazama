@@ -1,4 +1,4 @@
-// mazama is a terminal gopher and gemini client.
+// mazama is a terminal gopher, gemini and usenet client.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Flonk/mazama/cli"
 	"github.com/Flonk/mazama/gemini"
 	"github.com/Flonk/mazama/ui"
 )
@@ -18,10 +19,16 @@ import (
 const defaultURL = "gopher://gopher.floodgap.com/"
 
 func main() {
+	// mazama <command> ...: the command-line interface (see cli).
+	if len(os.Args) > 1 && cli.IsCommand(os.Args[1]) {
+		os.Exit(cli.Run(os.Args[1:], cli.Options{Gemini: geminiClient()}))
+	}
+
 	style := flag.String("style", ui.DefaultStyle,
 		"markdown style: auto, one of "+strings.Join(ui.StyleNames(), ", ")+", or a path to a glamour JSON style")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: mazama [flags] [address]\n\nThe address may be a gopher://, gemini:// or http(s):// URL, or a bare\nhost[/path], in which case the protocol is guessed.\n\n")
+		cli.Usage(os.Stderr)
+		fmt.Fprintln(os.Stderr, "\nInteractive flags:")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -44,6 +51,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Mouse capture is toggled per page by the model.
+	p := tea.NewProgram(ui.NewFromInput(raw, cfg, geminiClient()), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "mazama:", err)
+		os.Exit(1)
+	}
+}
+
+// geminiClient returns a gemini client with the trust-on-first-use
+// certificate store, or exits.
+func geminiClient() *gemini.Client {
 	tofuPath, err := gemini.DefaultTOFUPath()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mazama:", err)
@@ -54,11 +72,5 @@ func main() {
 		fmt.Fprintf(os.Stderr, "mazama: reading %s: %v\n", tofuPath, err)
 		os.Exit(1)
 	}
-
-	// Mouse capture is toggled per page by the model.
-	p := tea.NewProgram(ui.NewFromInput(raw, cfg, &gemini.Client{TOFU: tofu}), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "mazama:", err)
-		os.Exit(1)
-	}
+	return &gemini.Client{TOFU: tofu}
 }

@@ -21,16 +21,26 @@ const (
 	protoGemini = "gemini"
 	protoHTTPS  = "https"
 	protoHTTP   = "http"
+	// news:// still upgrades to TLS with STARTTLS when the server offers it.
+	protoNews    = "news"
+	protoNewsTLS = "nntps"
 )
 
+// isNewsHost reports whether a host name suggests a Usenet server.
+func isNewsHost(host string) bool {
+	host = strings.ToLower(host)
+	return strings.HasPrefix(host, "news.") || strings.HasPrefix(host, "usenet.")
+}
+
 // probeOrder is the preference when several protocols answer: this is a
-// small-web client, so gemini and gopher win over the web.
-var probeOrder = []string{protoGemini, protoGopher, protoHTTPS}
+// small-web client, so gopher and gemini win over the web, gopher first.
+var probeOrder = []string{protoGopher, protoGemini, protoHTTPS}
 
 // probePorts are the ports probed per protocol. Tests point them elsewhere.
 var probePorts = map[string]string{
 	protoGemini: "1965",
 	protoGopher: "70",
+	protoNews:   "119",
 	protoHTTPS:  "443",
 }
 
@@ -68,10 +78,16 @@ func hintProtocol(u *url.URL) string {
 		return protoHTTPS
 	case "80", "8080", "8000":
 		return protoHTTP
+	case "119":
+		return protoNews
+	case "563":
+		return protoNewsTLS
 	}
 
 	host := strings.ToLower(u.Hostname())
 	switch {
+	case strings.HasPrefix(host, "nntp."):
+		return protoNews
 	case strings.HasPrefix(host, "gopher."):
 		return protoGopher
 	case strings.HasPrefix(host, "gemini."):
@@ -100,6 +116,13 @@ func probeProtocol(ctx context.Context, host string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
+	order := probeOrder
+	if isNewsHost(host) {
+		// news.example.org is usually a news server, but sometimes a
+		// website (news.ycombinator.com): try news first, then the rest.
+		order = append([]string{protoNews}, probeOrder...)
+	}
+
 	// Resolve once up front so an unknown host gets a clear error instead of
 	// three failed connects.
 	if _, err := net.DefaultResolver.LookupHost(ctx, host); err != nil {
@@ -110,8 +133,8 @@ func probeProtocol(ctx context.Context, host string) (string, error) {
 		proto string
 		ok    bool
 	}
-	results := make(chan result, len(probeOrder))
-	for _, proto := range probeOrder {
+	results := make(chan result, len(order))
+	for _, proto := range order {
 		go func() {
 			var d net.Dialer
 			c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, probePorts[proto]))
@@ -124,7 +147,7 @@ func probeProtocol(ctx context.Context, host string) (string, error) {
 
 	state := map[string]*bool{}
 	decide := func() (string, bool) {
-		for _, proto := range probeOrder {
+		for _, proto := range order {
 			ok := state[proto]
 			if ok == nil {
 				return "", false // still waiting on a more preferred protocol
@@ -139,13 +162,13 @@ func probeProtocol(ctx context.Context, host string) (string, error) {
 	// for the preferred ones: hosts that silently drop packets on closed
 	// ports would otherwise always cost the full timeout.
 	var grace <-chan time.Time
-	for range probeOrder {
+	for range order {
 		select {
 		case r := <-results:
 			state[r.proto] = &r.ok
 			if proto, done := decide(); done {
 				if proto == "" {
-					return "", fmt.Errorf("%s doesn't answer on the gemini, gopher or https ports", host)
+					return "", fmt.Errorf("%s doesn't answer on the gopher, gemini or https ports", host)
 				}
 				return proto, nil
 			}
@@ -161,14 +184,14 @@ func probeProtocol(ctx context.Context, host string) (string, error) {
 		}
 		// Timed out (or grace over): whatever hasn't answered counts as failed.
 		f := false
-		for _, proto := range probeOrder {
+		for _, proto := range order {
 			if state[proto] == nil {
 				state[proto] = &f
 			}
 		}
 		proto, _ := decide()
 		if proto == "" {
-			return "", fmt.Errorf("%s didn't answer on the gemini, gopher or https ports", host)
+			return "", fmt.Errorf("%s didn't answer on the gopher, gemini or https ports", host)
 		}
 		return proto, nil
 	}

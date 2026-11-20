@@ -38,6 +38,10 @@ func (m Model) footer() string {
 		s = m.theme.Error.Render(m.status)
 	case m.status != "":
 		s = m.status
+	case m.cur != nil && m.cur.addr.News != nil && m.cur.kind == textPage:
+		s = m.theme.Footer.Render("↑↓ scroll · ⌫ back · n group · : go · r reload · q quit")
+	case m.cur != nil && m.cur.addr.News != nil:
+		s = m.theme.Footer.Render("↑↓ move · ⏎ open · ⌫ back · n group · : go · r reload · q quit")
 	case m.cur != nil && m.cur.markdown && len(m.cur.links) > 0:
 		s = m.theme.Footer.Render("↑↓ scroll · click/tab link · ⌫ back · : go · r reload · q quit")
 	case m.cur != nil && m.cur.kind == textPage:
@@ -67,7 +71,7 @@ func (m Model) body() string {
 	return box.Render(strings.Join(lines, "\n"))
 }
 
-func (m Model) menuLine(it gopher.Item, selected bool) string {
+func (m Model) menuLine(it menuItem, selected bool) string {
 	tag, style := m.describe(it)
 	tagS := m.theme.Tag
 	if selected {
@@ -91,33 +95,25 @@ func (m Model) menuLine(it gopher.Item, selected bool) string {
 }
 
 // describe returns the short type tag and text style for a menu item.
-func (m Model) describe(it gopher.Item) (string, lipgloss.Style) {
+func (m Model) describe(it menuItem) (string, lipgloss.Style) {
 	t := m.theme
+	style := t.Dead
 	switch it.Type {
 	case gopher.TypeInfo:
-		return "", t.Info
+		style = t.Info
 	case gopher.TypeError:
-		return "ERR", t.Error
+		style = t.Error
 	case gopher.TypeMenu:
-		return "DIR", t.Menu
+		style = t.Menu
 	case gopher.TypeText:
-		return "TXT", t.Text
+		style = t.Text
 	case gopher.TypeSearch:
-		return "ASK", t.Other
+		style = t.Other
 	case gopher.TypeHTML:
+		style = t.Text
 		if it.ExternalURL() != "" {
-			return "URL", t.Other
+			style = t.Other
 		}
-		return "HTM", t.Text
-	case gopher.TypeGIF, gopher.TypeImage:
-		return "IMG", t.Dead
-	case gopher.TypeSound:
-		return "SND", t.Dead
-	case gopher.TypeBinary, gopher.TypeDOS, gopher.TypeBinHex, gopher.TypeUUE:
-		return "BIN", t.Dead
-	case gopher.TypeTelnet, gopher.TypeTN3270:
-		return "TEL", t.Dead
-	default:
-		return "?" + string(it.Type), t.Dead
 	}
+	return itemTag(it), style
 }

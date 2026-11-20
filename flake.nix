@@ -1,5 +1,5 @@
 {
-  description = "A terminal client for gopher and gemini";
+  description = "A terminal client for gopher, gemini and usenet";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -32,10 +32,10 @@
               baseName != "docs" && baseName != ".direnv" && baseName != "result" && baseName != "mazama";
           };
 
-          vendorHash = "sha256-URU59cpeLXABmsorpJQ97eVje+Fj6MfQY04JgH8/Mag=";
+          vendorHash = "sha256-pviHzHlvLDTpspZOQBYQmaM9LQxoI9FIK3NVuXbeCeI=";
 
           meta = {
-            description = "A terminal client for gopher and gemini";
+            description = "A terminal client for gopher, gemini and usenet";
             homepage = "https://github.com/Flonk/mazama";
             license = pkgs.lib.licenses.mit;
             mainProgram = "mazama";

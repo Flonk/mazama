@@ -129,29 +129,40 @@ func (m Model) updateTextKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // resolveLink turns a link target into an absolute URL, resolving relative
 // links against the current page.
 func (m Model) resolveLink(raw string) (string, error) {
+	if m.cur == nil {
+		return raw, nil
+	}
+	return resolveLink(m.cur.addr, raw)
+}
+
+// resolveLink resolves a link target found on the page at base.
+func resolveLink(base Location, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
-	if u.Scheme != "" || m.cur == nil {
+	if u.Scheme != "" {
 		return raw, nil
 	}
 	if u.Path == "" && u.Host == "" {
 		return "", errors.New("in-page anchors aren't supported")
 	}
-	if base := m.cur.addr.Gemini; base != nil {
-		return base.ResolveReference(u).String(), nil
+	if base.Gemini != nil {
+		return base.Gemini.ResolveReference(u).String(), nil
+	}
+	if base.News != nil {
+		return "", errors.New("relative links don't lead anywhere in a news article")
 	}
 	// Gopher has no URL hierarchy; treat the selector as a path.
 	sel := u.Path
 	if !strings.HasPrefix(sel, "/") {
-		sel = path.Join(path.Dir(m.cur.addr.Gopher.Selector), sel)
+		sel = path.Join(path.Dir(base.Gopher.Selector), sel)
 	}
 	typ := gopher.TypeMenu
 	if path.Ext(sel) != "" {
 		typ = gopher.TypeText
 	}
-	a := m.cur.addr.Gopher
+	a := base.Gopher
 	a.Type, a.Selector, a.Query = typ, sel, ""
 	return a.String(), nil
 }
@@ -167,7 +178,7 @@ func (m Model) openLink(raw string) (tea.Model, tea.Cmd) {
 	}
 	u, _ := url.Parse(abs)
 	switch strings.ToLower(u.Scheme) {
-	case "gopher", "gemini":
+	case "gopher", "gemini", "news", "nntp", "nntps", "snews":
 		loc, err := ParseLocation(abs)
 		if err != nil {
 			m.status = "error: " + err.Error()

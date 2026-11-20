@@ -56,7 +56,8 @@ func StyleNames() []string {
 }
 
 // LoadStyle resolves a bundled style name, a glamour built-in style name, or
-// a path to a glamour JSON style file, in that order.
+// a path to a JSON file, in that order. The file is either a glamour style or
+// a base16 scheme (Stylix, tinted-theming), which is mapped onto a style.
 func LoadStyle(nameOrPath string) (gansi.StyleConfig, error) {
 	if b, err := bundledStyles.ReadFile("themes/" + nameOrPath + ".json"); err == nil {
 		return parseStyle(nameOrPath, b)
@@ -72,6 +73,12 @@ func LoadStyle(nameOrPath string) (gansi.StyleConfig, error) {
 }
 
 func parseStyle(name string, b []byte) (gansi.StyleConfig, error) {
+	if pal, ok, err := base16Palette(b); ok {
+		if err != nil {
+			return gansi.StyleConfig{}, fmt.Errorf("%s: %w", name, err)
+		}
+		return base16Style(pal)
+	}
 	var cfg gansi.StyleConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return gansi.StyleConfig{}, fmt.Errorf("parse %s: %w", name, err)

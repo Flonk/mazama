@@ -43,6 +43,9 @@
         };
       });
 
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+      homeModules.default = self.homeManagerModules.default;
+
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";

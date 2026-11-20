@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,13 +26,18 @@ func main() {
 	}
 
 	style := flag.String("style", ui.DefaultStyle,
-		"markdown style: auto, one of "+strings.Join(ui.StyleNames(), ", ")+", or a path to a glamour JSON style")
+		"markdown style: auto, one of "+strings.Join(ui.StyleNames(), ", ")+
+			", or a path to a glamour JSON style or base16 scheme;\n"+
+			"defaults to $MAZAMA_STYLE, then $XDG_CONFIG_HOME/mazama/style.json if it exists")
 	flag.Usage = func() {
 		cli.Usage(os.Stderr)
 		fmt.Fprintln(os.Stderr, "\nInteractive flags:")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if !flagSet("style") {
+		*style = defaultStyle()
+	}
 
 	raw := defaultURL
 	if flag.NArg() > 0 {
@@ -57,6 +63,34 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mazama:", err)
 		os.Exit(1)
 	}
+}
+
+func flagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
+// defaultStyle picks the style when -style isn't given: $MAZAMA_STYLE, then
+// the user's style file (written by e.g. the Home Manager / Stylix module),
+// then the built-in default.
+func defaultStyle() string {
+	if s := os.Getenv("MAZAMA_STYLE"); s != "" {
+		return s
+	}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, ".config")
+		}
+	}
+	if dir != "" {
+		p := filepath.Join(dir, "mazama", "style.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ui.DefaultStyle
 }
 
 // geminiClient returns a gemini client with the trust-on-first-use

@@ -60,7 +60,9 @@ from the address and, if needed, by probing the host. It defaults to
 - Web links open in your browser via `xdg-open` / `open`.
 - Mouse support: wheel, click to follow, back button.
 - Themes: `-style one-dark` (default), any glamour style (`dracula`,
-  `tokyo-night`, …), `auto`, or a glamour JSON file. Menus follow the theme.
+  `tokyo-night`, …), `auto`, a glamour JSON file, or a base16 scheme as JSON
+  (`{"base00": "#282c34", …}`). Menus follow the theme. Without `-style`,
+  mazama uses `$MAZAMA_STYLE`, then `~/.config/mazama/style.json` if present.
 
 ## Keys
 
@@ -112,6 +114,19 @@ use `-q` or `input`), `login`, `external` (web links: printed, or opened with
 nix profile install github:Flonk/mazama     # nix
 go install github.com/Flonk/mazama@latest  # go
 make install                               # from a checkout; PREFIX=/usr/local by default
+```
+
+### Home Manager and Stylix
+
+The flake provides a Home Manager module. With [Stylix](https://github.com/nix-community/stylix)
+enabled, mazama picks up its base16 palette automatically:
+
+```nix
+# flake inputs: mazama.url = "github:Flonk/mazama";
+imports = [ inputs.mazama.homeManagerModules.default ];
+programs.mazama.enable = true;
+# stylix.targets.mazama.enable = false;  # opt out of Stylix theming
+# programs.mazama.style = "dracula";     # or pick a style yourself
 ```
 
 For development: `nix develop` (or `direnv allow`) for a shell with Go, then
